@@ -1,194 +1,350 @@
+"""
+Views for the profiling app.
 
-# Create your views here.
-from django.http import  JsonResponse
-from pymongo import MongoClient
-from rest_framework.views import APIView
-import datetime
+This module provides API endpoints for the Sejam service integration,
+including requesting OTPs and validating them to retrieve user profiles.
+"""
+
 import json
-import requests
+import logging
+import datetime
 import pytz
+import requests
 
+from django.http import JsonResponse
+from django.conf import settings
+from rest_framework.views import APIView
+from rest_framework.throttling import AnonRateThrottle
+from rest_framework.response import Response
+from rest_framework import status
+
+from .models import AccessToken, Profile, Shareholder, ErrorLog
+
+# Configure logging
+logger = logging.getLogger(__name__)
 iran_tz = pytz.timezone('Asia/Tehran')
 
-client = MongoClient(port=27017)
- 
-db = client['sejamProfile_DRF']
 
-def generate_acceses_token():
-    global db
-    current_datetime = datetime.datetime.now(iran_tz)
-    url = "https://api.sejam.ir:8080/v1.1/accessToken"
-    headers = {"accept": "application/json","Content-Type": "application/json-patch+json"}    
-    data = {"username": "911","password": "D@f4d38bn" }
-                                        
-    response = requests.post(url, headers=headers, data=json.dumps(data))
-    response=response.json()
-    ttl_str = response['data']['ttl']  # Time duration string in 'HH:MM:SS' format
-    ttl_components = ttl_str.split(':')
-    ttl_duration = datetime.timedelta(hours=int(ttl_components[0]), minutes=int(ttl_components[1]), seconds=int(ttl_components[2]))
-    ttl_time = current_datetime + ttl_duration
-    tehran_tz = pytz.timezone("Asia/Tehran")
-    ttl_time = ttl_time.astimezone(tehran_tz)
-
-    acceses_token = {'token':response['data']['accessToken'],'TokenEndTime':str(ttl_time)}
-    db.token.drop()
-    db.token.insert_one(acceses_token) 
-
-
-def OTP(sh_id):
-    global db
-    try:
-        acceses_token_dana=list(client['sejamProfile_DRF'].token.find())[0]
-        acceses_token_dana['TokenEndTime']=datetime.datetime.strptime(acceses_token_dana['TokenEndTime'], "%Y-%m-%d %H:%M:%S.%f%z")
-
-        # print(acceses_token_dana['TokenEndTime'])
-        # print(acceses_token_dana['TokenEndTime']<datetime.datetime.now(iran_tz))
-        # print(acceses_token_dana['TokenEndTime'],datetime.datetime.now(iran_tz))
-        if acceses_token_dana['TokenEndTime']<datetime.datetime.now(iran_tz):
-            print('reloading access token')
-            generate_acceses_token()
-            acceses_token_dana=list(client['sejamProfile_DRF'].token.find())[0]
-            acceses_token_dana['TokenEndTime']=datetime.datetime.strptime(acceses_token_dana['TokenEndTime'], "%Y-%m-%d %H:%M:%S.%f%z")
-            print(acceses_token_dana['TokenEndTime'])
-    except:
-        print('genrating access token')
-        generate_acceses_token() 
-        
-    acceses_token_dana=list(client['sejamProfile_DRF'].token.find())[0]
-    acceses_token_dana['TokenEndTime']=datetime.datetime.strptime(acceses_token_dana['TokenEndTime'], "%Y-%m-%d %H:%M:%S.%f%z")
-
-    print(acceses_token_dana['TokenEndTime'])
-    url = "https://api.sejam.ir:8080/v1.1/kycOtp"
-    data = {"uniqueIdentifier":sh_id}
-    headers = {"accept": "application/json","Content-Type": "application/json-patch+json", "Authorization": "bearer "+acceses_token_dana['token'] }
-    a=requests.post(url, headers=headers, data=json.dumps(data))
-    return {'id':sh_id,'status':a.status_code}
-def profile_sejam(sh_id,otpCode):
-    global db
-    otp=otpCode
-    try:
-        acceses_token_dana=list(client['sejamProfile_DRF'].token.find())[0]
-        acceses_token_dana['TokenEndTime']=datetime.datetime.strptime(acceses_token_dana['TokenEndTime'], "%Y-%m-%d %H:%M:%S.%f%z")
-        if acceses_token_dana['TokenEndTime']<datetime.datetime.now(iran_tz):
-            print('reloading access token')
-            generate_acceses_token()
-            acceses_token_dana=list(client['sejamProfile_DRF'].token.find())[0]
-            acceses_token_dana['TokenEndTime']=datetime.datetime.strptime(acceses_token_dana['TokenEndTime'], "%Y-%m-%d %H:%M:%S.%f%z")
-
-    except:
-        print('generate access token')
-        generate_acceses_token()
-        acceses_token_dana=list(client['sejamProfile_DRF'].token.find())[0]
-        acceses_token_dana['TokenEndTime']=datetime.datetime.strptime(acceses_token_dana['TokenEndTime'], "%Y-%m-%d %H:%M:%S.%f%z")
-
-        
+def generate_access_token():
+    """
+    Generate a new access token from the Sejam API.
     
-    base_url = f"https://api.sejam.ir:8080/v1.1/servicesWithOtp/profiles/{sh_id}"
-    url = f"{base_url}?otp={otp}"
+    Returns:
+        AccessToken: The new access token object
+    """
+    current_datetime = datetime.datetime.now(iran_tz)
+    url = f"{settings.SEJAM_API_BASE_URL}/accessToken"
     
     headers = {
-                "accept": "application/json",
-                "Content-Type": "application/json-patch+json",
-                "Authorization": "bearer "+acceses_token_dana['token']
-              }
+        "accept": "application/json",
+        "Content-Type": "application/json-patch+json"
+    }
+    
+    data = {
+        "username": settings.SEJAM_API_USERNAME,
+        "password": settings.SEJAM_API_PASSWORD
+    }
+    
+    try:
+        response = requests.post(url, headers=headers, data=json.dumps(data))
+        response.raise_for_status()  # Raise an exception for HTTP errors
+        response_data = response.json()
+        
+        # Calculate token expiration time
+        ttl_str = response_data['data']['ttl']
+        ttl_components = ttl_str.split(':')
+        ttl_duration = datetime.timedelta(
+            hours=int(ttl_components[0]),
+            minutes=int(ttl_components[1]),
+            seconds=int(ttl_components[2])
+        )
+        ttl_time = current_datetime + ttl_duration
+        ttl_time = ttl_time.astimezone(iran_tz)
+        
+        # Delete old tokens and save new one
+        AccessToken.objects.all().delete()
+        token = AccessToken.objects.create(
+            token=response_data['data']['accessToken'],
+            token_end_time=ttl_time
+        )
+        
+        return token
+        
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error generating access token: {str(e)}")
+        ErrorLog.objects.create(error_data=str(e))
+        raise
+
+
+def get_valid_token():
+    """
+    Get a valid access token. If no valid token exists, generate a new one.
+    
+    Returns:
+        str: Valid access token
+    """
+    try:
+        # Try to get the latest token
+        token = AccessToken.objects.latest('created_at')
+        
+        # Check if token is expired
+        if token.token_end_time < datetime.datetime.now(iran_tz):
+            logger.info("Access token expired, generating new one")
+            token = generate_access_token()
+            
+    except AccessToken.DoesNotExist:
+        logger.info("No access token found, generating new one")
+        token = generate_access_token()
+        
+    return token.token
+
+
+def request_otp(sh_id):
+    """
+    Request an OTP from the Sejam API for a given identifier.
+    
+    Args:
+        sh_id (str): The unique identifier for the user
+        
+    Returns:
+        dict: Response data with status information
+    """
+    token = get_valid_token()
+    
+    url = f"{settings.SEJAM_API_BASE_URL}/kycOtp"
+    data = {"uniqueIdentifier": sh_id}
+    headers = {
+        "accept": "application/json",
+        "Content-Type": "application/json-patch+json",
+        "Authorization": f"bearer {token}"
+    }
+    
+    try:
+        response = requests.post(url, headers=headers, data=json.dumps(data))
+        response.raise_for_status()
+        return {'id': sh_id, 'status': response.status_code}
+        
+    except requests.exceptions.HTTPError as e:
+        logger.error(f"HTTP error requesting OTP: {str(e)}")
+        ErrorLog.objects.create(error_data=response.text if 'response' in locals() else str(e))
+        return {'id': sh_id, 'status': e.response.status_code if hasattr(e, 'response') else 500, 'error': str(e)}
+        
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error requesting OTP: {str(e)}")
+        ErrorLog.objects.create(error_data=str(e))
+        return {'id': sh_id, 'status': 500, 'error': 'Connection error'}
+
+
+def get_profile(sh_id, otp_code):
+    """
+    Validate OTP and retrieve user profile from Sejam API.
+    
+    Args:
+        sh_id (str): The unique identifier for the user
+        otp_code (str): The OTP code to validate
+        
+    Returns:
+        dict: Structured profile data or error information
+    """
+    token = get_valid_token()
+    
+    base_url = f"{settings.SEJAM_API_BASE_URL}/servicesWithOtp/profiles/{sh_id}"
+    url = f"{base_url}?otp={otp_code}"
+    
+    headers = {
+        "accept": "application/json",
+        "Content-Type": "application/json-patch+json",
+        "Authorization": f"bearer {token}"
+    }
+    
     try:
         response = requests.get(url, headers=headers)
-        # print(response.json())
-        # print('\n---------------------------------------------------------------------------------------------------------')
-        res=response.json()
-        db.profile.insert_one({'id':str(res['data']['mobile']),'data':res['data']}) 
-        if res['data']['type']=='IranianPrivatePerson':
-            pInf={'uniqueIdentifier':   str(res['data']['uniqueIdentifier']).strip(),
-                  'type':               str(res['data']['type']).strip(),
-                  'firstName ':         str(res['data']['privatePerson']['firstName']).strip(),
-                  'lastName':           str(res['data']['privatePerson']['lastName']).strip(),
-                  'fatherName':         str(res['data']['privatePerson']['fatherName']).strip(),
-                  'gender':             str(res['data']['privatePerson']['gender']).strip(),
-                  'birthDate':          str(res['data']['privatePerson']['birthDate']).strip(),
-                  'placeOfBirth':       str(res['data']['privatePerson']['placeOfBirth']).strip(),
-                  'placeOfIssue':       str(res['data']['privatePerson']['placeOfIssue']).strip(),
-                  'mobile':             str(res['data']['mobile']).strip(),
-                  'email':              str(res['data']['email']).strip()   ,
-                  'tradeCode':          str(res['data']['tradingCodes'][0]['code']).strip(),
-                  'sheba':              str(res['data']['accounts'][0]['sheba']).strip(),
-                  'bank_name      ':    str(res['data']['accounts'][0]['bank']['name']).strip(),
-                  'bank_branchCode':    str(res['data']['accounts'][0]['branchCode']).strip(),
-                  'bank_branchName':    str(res['data']['accounts'][0]['branchName']).strip(),
-                  'bank_branchCity':    str(res['data']['accounts'][0]['branchCity']['name']).strip(),
-                  'bank_accountNumber': str(res['data']['accounts'][0]['accountNumber']).strip(),
-                  }
-        elif  res['data']['type']=='IranianLegalPerson':
-            SHR={}
-            for i in res['data']['legalPersonShareholders']:
-                SHR[i['uniqueIdentifier']]={'Name':i['firstName'].strip(),'LastName':i['lastName'].strip(),'position':i['positionType']}
+        response.raise_for_status()
+        res = response.json()
+        
+        # Store raw data
+        profile_data = res['data']
+        
+        # Try to get existing profile or create new one
+        profile, created = Profile.objects.update_or_create(
+            unique_identifier=profile_data['uniqueIdentifier'],
+            defaults={
+                'person_type': profile_data['type'],
+                'mobile': profile_data['mobile'],
+                'email': profile_data.get('email', ''),
+                'raw_data': profile_data
+            }
+        )
+        
+        # Process person-specific data
+        if profile_data['type'] == 'IranianPrivatePerson':
+            person_data = profile_data['privatePerson']
+            profile.first_name = person_data.get('firstName', '').strip()
+            profile.last_name = person_data.get('lastName', '').strip()
+            profile.father_name = person_data.get('fatherName', '').strip()
+            profile.gender = person_data.get('gender', '').strip()
+            profile.birth_date = person_data.get('birthDate', '').strip()
+            profile.place_of_birth = person_data.get('placeOfBirth', '').strip()
+            profile.place_of_issue = person_data.get('placeOfIssue', '').strip()
+            
+        elif profile_data['type'] == 'IranianLegalPerson':
+            legal_data = profile_data['legalPerson']
+            profile.company_name = legal_data.get('companyName', '').strip()
+            profile.economic_code = legal_data.get('economicCode', '').strip()
+            profile.register_date = legal_data.get('registerDate', '').strip()
+            profile.register_place = legal_data.get('registerPlace', '').strip()
+            profile.register_number = legal_data.get('registerNumber', '').strip()
+            
+            # Process shareholders
             persian_positions = {
-                                    'Chairman': 'رئیس هیئت مدیره',
-                                    'Ceo': 'مدیرعامل',
-                                    'Member': 'عضو هیئت مدیره',
-                                    'DeputyChairman': 'نایب رئیس هیئت مدیره'
-                                }
-                                
-            for key, value in SHR.items():
-                position = value['position']
-                persian_position = persian_positions.get(position)
-                if persian_position:
-                    value['position'] = persian_position   
-            pInf={'uniqueIdentifier':   str(res['data']['uniqueIdentifier']).strip(),
-                  'type':               str(res['data']['type']).strip(),
-                  'companyName ':       str(res['data']['legalPerson']['companyName']).strip(),
-                  'economicCode':       str(res['data']['legalPerson']['economicCode']).strip(),
-                  'registerDate':       str(res['data']['legalPerson']['registerDate']).strip(),
-                  'registerPlace':      str(res['data']['legalPerson']['registerPlace']).strip(),
-                  'registerNumber':     str(res['data']['legalPerson']['registerNumber']).strip(),
-                  'shareHolders':       SHR,
-                  'mobile':             str(res['data']['mobile']).strip(),
-                  'email':              str(res['data']['email']).strip(),
-                  'tradeCode':          str(res['data']['tradingCodes']).strip(),
-                  'sheba':              str(res['data']['accounts'][0]['sheba']).strip(),
-                  'bank_name      ':    str(res['data']['accounts'][0]['bank']['name']).strip(),
-                  'bank_branchCode':    str(res['data']['accounts'][0]['branchCode']).strip(),
-                  'bank_branchName':    str(res['data']['accounts'][0]['branchName']).strip(),
-                  'bank_branchCity':    str(res['data']['accounts'][0]['branchCity']['name']).strip(),
-                  'bank_accountNumber': str(res['data']['accounts'][0]['accountNumber']).strip(),
-                  }
-        return pInf
+                'Chairman': 'رئیس هیئت مدیره',
+                'Ceo': 'مدیرعامل',
+                'Member': 'عضو هیئت مدیره',
+                'DeputyChairman': 'نایب رئیس هیئت مدیره'
+            }
+            
+            # Clear existing shareholders and add new ones
+            profile.shareholders.all().delete()
+            for shareholder in profile_data.get('legalPersonShareholders', []):
+                position = shareholder.get('positionType', '')
+                persian_position = persian_positions.get(position, position)
+                
+                Shareholder.objects.create(
+                    profile=profile,
+                    unique_identifier=shareholder.get('uniqueIdentifier', ''),
+                    first_name=shareholder.get('firstName', '').strip(),
+                    last_name=shareholder.get('lastName', '').strip(),
+                    position=persian_position
+                )
         
-    except:
-        db.Errors.insert_one({'data':response.text}) 
-        if 'error' in response.json():
-            if response.json()['error']['customMessage']=='invalid otp':
-                return {'error':'invalid OTP'}
+        # Bank information
+        if profile_data.get('tradingCodes') and len(profile_data['tradingCodes']) > 0:
+            profile.trade_code = profile_data['tradingCodes'][0].get('code', '').strip()
+            
+        if profile_data.get('accounts') and len(profile_data['accounts']) > 0:
+            account = profile_data['accounts'][0]
+            profile.sheba = account.get('sheba', '').strip()
+            profile.bank_account_number = account.get('accountNumber', '').strip()
+            profile.bank_branch_code = account.get('branchCode', '').strip()
+            profile.bank_branch_name = account.get('branchName', '').strip()
+            
+            if account.get('bank'):
+                profile.bank_name = account['bank'].get('name', '').strip()
+                
+            if account.get('branchCity'):
+                profile.bank_branch_city = account['branchCity'].get('name', '').strip()
+        
+        profile.save()
+        
+        # Format response
+        if profile.person_type == 'IranianPrivatePerson':
+            return {
+                'uniqueIdentifier': profile.unique_identifier,
+                'type': profile.person_type,
+                'firstName': profile.first_name,
+                'lastName': profile.last_name,
+                'fatherName': profile.father_name,
+                'gender': profile.gender,
+                'birthDate': profile.birth_date,
+                'placeOfBirth': profile.place_of_birth,
+                'placeOfIssue': profile.place_of_issue,
+                'mobile': profile.mobile,
+                'email': profile.email,
+                'tradeCode': profile.trade_code,
+                'sheba': profile.sheba,
+                'bank_name': profile.bank_name,
+                'bank_branchCode': profile.bank_branch_code,
+                'bank_branchName': profile.bank_branch_name,
+                'bank_branchCity': profile.bank_branch_city,
+                'bank_accountNumber': profile.bank_account_number,
+            }
         else:
-            return {'error':'somthing went wrong'}
+            # Process shareholders for response
+            shareholders = {}
+            for sh in profile.shareholders.all():
+                shareholders[sh.unique_identifier] = {
+                    'Name': sh.first_name,
+                    'LastName': sh.last_name,
+                    'position': sh.position
+                }
+                
+            return {
+                'uniqueIdentifier': profile.unique_identifier,
+                'type': profile.person_type,
+                'companyName': profile.company_name,
+                'economicCode': profile.economic_code,
+                'registerDate': profile.register_date,
+                'registerPlace': profile.register_place,
+                'registerNumber': profile.register_number,
+                'shareHolders': shareholders,
+                'mobile': profile.mobile,
+                'email': profile.email,
+                'tradeCode': profile.trade_code,
+                'sheba': profile.sheba,
+                'bank_name': profile.bank_name,
+                'bank_branchCode': profile.bank_branch_code,
+                'bank_branchName': profile.bank_branch_name,
+                'bank_branchCity': profile.bank_branch_city,
+                'bank_accountNumber': profile.bank_account_number,
+            }
+            
+    except requests.exceptions.HTTPError as e:
+        logger.error(f"HTTP error retrieving profile: {str(e)}")
+        ErrorLog.objects.create(error_data=response.text if 'response' in locals() else str(e))
         
-###___________________________________________________________________________________________________________________________________________###
-###___________________________________________________________________________________________________________________________________________###
-###___________________________________________________________________________________________________________________________________________###
-###___________________________________________________________________________________________________________________________________________###
+        # Check for invalid OTP error
+        if hasattr(e, 'response') and e.response.status_code == 400:
+            try:
+                error_data = e.response.json()
+                if 'error' in error_data and error_data['error'].get('customMessage') == 'invalid otp':
+                    return {'error': 'invalid OTP'}
+            except ValueError:
+                pass
+                
+        return {'error': 'Error retrieving profile data'}
+        
+    except Exception as e:
+        logger.error(f"Error retrieving profile: {str(e)}")
+        ErrorLog.objects.create(error_data=str(e))
+        return {'error': 'Something went wrong'}
 
 
 class GetOTPView(APIView):
+    """API view to request an OTP for a user."""
+    throttle_classes = [AnonRateThrottle]
+    
     def get(self, request, sh_id, format=None):
-        data=OTP(str(sh_id))
-        response=JsonResponse(data, safe=False ,json_dumps_params={'ensure_ascii': False})
-        response["Access-Control-Allow-Origin"] = "*"
-        response['Content-Type']= 'application/json'
-        response['Charset']= 'utf-8'
-        response["Access-Control-Allow-Methods"] = "GET"
-        response["Access-Control-Max-Age"] = "1000"
-        response["Access-Control-Allow-Headers"] = "X-Requested-With, Content-Type"
-        return response
+        """
+        Get an OTP for the specified user ID.
         
+        Args:
+            request: The HTTP request
+            sh_id: The unique identifier for the user
+            format: The response format
+            
+        Returns:
+            Response: JSON response with OTP request status
+        """
+        data = request_otp(str(sh_id))
+        return Response(data)
+
 
 class ValidateOTPView(APIView):
-    def get(self, request,sh_id, otpCode, format=None):
-        data=profile_sejam(str(sh_id), str(otpCode))
-        response=JsonResponse(data, safe=False ,json_dumps_params={'ensure_ascii': False})
-        response["Access-Control-Allow-Origin"] = "*"
-        response['Content-Type']= 'application/json'
-        response['Charset']= 'utf-8'
-        response["Access-Control-Allow-Methods"] = "GET"
-        response["Access-Control-Max-Age"] = "1000"
-        response["Access-Control-Allow-Headers"] = "X-Requested-With, Content-Type"
-        return response
-       
+    """API view to validate an OTP and retrieve user profile."""
+    throttle_classes = [AnonRateThrottle]
+    
+    def get(self, request, sh_id, otpCode, format=None):
+        """
+        Validate OTP and return user profile data.
+        
+        Args:
+            request: The HTTP request
+            sh_id: The unique identifier for the user
+            otpCode: The OTP code to validate
+            format: The response format
+            
+        Returns:
+            Response: JSON response with profile data or error
+        """
+        data = get_profile(str(sh_id), str(otpCode))
+        return Response(data)
