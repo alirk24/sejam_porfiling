@@ -217,7 +217,7 @@ def get_profile(sh_id, otp_code):
                     position=persian_position
                 )
         
-        # Bank information
+        # Bank information - with safe field access
         if profile_data.get('tradingCodes') and len(profile_data['tradingCodes']) > 0:
             profile.trade_code = profile_data['tradingCodes'][0].get('code', '').strip()
             
@@ -228,10 +228,12 @@ def get_profile(sh_id, otp_code):
             profile.bank_branch_code = account.get('branchCode', '').strip()
             profile.bank_branch_name = account.get('branchName', '').strip()
             
-            if account.get('bank'):
+            # Safe access to bank name
+            if account.get('bank') and account['bank']:
                 profile.bank_name = account['bank'].get('name', '').strip()
                 
-            if account.get('branchCity'):
+            # Safe access to branch city - this is where the error was occurring
+            if account.get('branchCity') and account['branchCity']:
                 profile.bank_branch_city = account['branchCity'].get('name', '').strip()
         
         profile.save()
@@ -307,7 +309,6 @@ def get_profile(sh_id, otp_code):
         logger.error(f"Error retrieving profile: {str(e)}")
         ErrorLog.objects.create(error_data=str(e))
         return {'error': 'Something went wrong'}
-
 
 class GetOTPView(APIView):
     """API view to request an OTP for a user."""
