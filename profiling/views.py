@@ -164,7 +164,15 @@ def get_profile(sh_id, otp_code):
         
         # Store raw data
         profile_data = res['data']
+        print("Profile data retrieved successfully")
+        print("Profile data retrieved successfully")
+        print("Profile data retrieved successfully")
         
+        try:
+            logger.info(f"Profile data retrieved: {profile_data}")
+        except Exception as e:
+            logger.error(f"Error printing profile data: {str(e)}")
+        # Validate profile data structure
         # Try to get existing profile or create new one
         profile, created = Profile.objects.update_or_create(
             unique_identifier=profile_data['uniqueIdentifier'],
@@ -176,24 +184,28 @@ def get_profile(sh_id, otp_code):
             }
         )
         
+        # Helper function to safely strip strings
+        def safe_strip(value):
+            return str(value).strip() if value is not None else ''
+        
         # Process person-specific data
         if profile_data['type'] == 'IranianPrivatePerson':
             person_data = profile_data['privatePerson']
-            profile.first_name = person_data.get('firstName', '').strip()
-            profile.last_name = person_data.get('lastName', '').strip()
-            profile.father_name = person_data.get('fatherName', '').strip()
-            profile.gender = person_data.get('gender', '').strip()
-            profile.birth_date = person_data.get('birthDate', '').strip()
-            profile.place_of_birth = person_data.get('placeOfBirth', '').strip()
-            profile.place_of_issue = person_data.get('placeOfIssue', '').strip()
+            profile.first_name = safe_strip(person_data.get('firstName'))
+            profile.last_name = safe_strip(person_data.get('lastName'))
+            profile.father_name = safe_strip(person_data.get('fatherName'))
+            profile.gender = safe_strip(person_data.get('gender'))
+            profile.birth_date = safe_strip(person_data.get('birthDate'))
+            profile.place_of_birth = safe_strip(person_data.get('placeOfBirth'))
+            profile.place_of_issue = safe_strip(person_data.get('placeOfIssue'))
             
         elif profile_data['type'] == 'IranianLegalPerson':
             legal_data = profile_data['legalPerson']
-            profile.company_name = legal_data.get('companyName', '').strip()
-            profile.economic_code = legal_data.get('economicCode', '').strip()
-            profile.register_date = legal_data.get('registerDate', '').strip()
-            profile.register_place = legal_data.get('registerPlace', '').strip()
-            profile.register_number = legal_data.get('registerNumber', '').strip()
+            profile.company_name = safe_strip(legal_data.get('companyName'))
+            profile.economic_code = safe_strip(legal_data.get('economicCode'))
+            profile.register_date = safe_strip(legal_data.get('registerDate'))
+            profile.register_place = safe_strip(legal_data.get('registerPlace'))
+            profile.register_number = safe_strip(legal_data.get('registerNumber'))
             
             # Process shareholders
             persian_positions = {
@@ -211,30 +223,30 @@ def get_profile(sh_id, otp_code):
                 
                 Shareholder.objects.create(
                     profile=profile,
-                    unique_identifier=shareholder.get('uniqueIdentifier', ''),
-                    first_name=shareholder.get('firstName', '').strip(),
-                    last_name=shareholder.get('lastName', '').strip(),
+                    unique_identifier=safe_strip(shareholder.get('uniqueIdentifier')),
+                    first_name=safe_strip(shareholder.get('firstName')),
+                    last_name=safe_strip(shareholder.get('lastName')),
                     position=persian_position
                 )
         
         # Bank information - with safe field access
         if profile_data.get('tradingCodes') and len(profile_data['tradingCodes']) > 0:
-            profile.trade_code = profile_data['tradingCodes'][0].get('code', '').strip()
+            profile.trade_code = safe_strip(profile_data['tradingCodes'][0].get('code'))
             
         if profile_data.get('accounts') and len(profile_data['accounts']) > 0:
             account = profile_data['accounts'][0]
-            profile.sheba = account.get('sheba', '').strip()
-            profile.bank_account_number = account.get('accountNumber', '').strip()
-            profile.bank_branch_code = account.get('branchCode', '').strip()
-            profile.bank_branch_name = account.get('branchName', '').strip()
+            profile.sheba = safe_strip(account.get('sheba'))
+            profile.bank_account_number = safe_strip(account.get('accountNumber'))
+            profile.bank_branch_code = safe_strip(account.get('branchCode'))
+            profile.bank_branch_name = safe_strip(account.get('branchName'))
             
             # Safe access to bank name
             if account.get('bank') and account['bank']:
-                profile.bank_name = account['bank'].get('name', '').strip()
+                profile.bank_name = safe_strip(account['bank'].get('name'))
                 
             # Safe access to branch city - this is where the error was occurring
             if account.get('branchCity') and account['branchCity']:
-                profile.bank_branch_city = account['branchCity'].get('name', '').strip()
+                profile.bank_branch_city = safe_strip(account['branchCity'].get('name'))
         
         profile.save()
         
@@ -251,14 +263,14 @@ def get_profile(sh_id, otp_code):
                 'placeOfBirth': profile.place_of_birth,
                 'placeOfIssue': profile.place_of_issue,
                 'mobile': profile.mobile,
-                'email': profile.email,
-                'tradeCode': profile.trade_code,
-                'sheba': profile.sheba,
-                'bank_name': profile.bank_name,
-                'bank_branchCode': profile.bank_branch_code,
-                'bank_branchName': profile.bank_branch_name,
-                'bank_branchCity': profile.bank_branch_city,
-                'bank_accountNumber': profile.bank_account_number,
+                'email': profile.email or '',
+                'tradeCode': profile.trade_code or '',
+                'sheba': profile.sheba or '',
+                'bank_name': profile.bank_name or '',
+                'bank_branchCode': profile.bank_branch_code or '',
+                'bank_branchName': profile.bank_branch_name or '',
+                'bank_branchCity': profile.bank_branch_city or '',
+                'bank_accountNumber': profile.bank_account_number or '',
             }
         else:
             # Process shareholders for response
@@ -280,14 +292,14 @@ def get_profile(sh_id, otp_code):
                 'registerNumber': profile.register_number,
                 'shareHolders': shareholders,
                 'mobile': profile.mobile,
-                'email': profile.email,
-                'tradeCode': profile.trade_code,
-                'sheba': profile.sheba,
-                'bank_name': profile.bank_name,
-                'bank_branchCode': profile.bank_branch_code,
-                'bank_branchName': profile.bank_branch_name,
-                'bank_branchCity': profile.bank_branch_city,
-                'bank_accountNumber': profile.bank_account_number,
+                'email': profile.email or '',
+                'tradeCode': profile.trade_code or '',
+                'sheba': profile.sheba or '',
+                'bank_name': profile.bank_name or '',
+                'bank_branchCode': profile.bank_branch_code or '',
+                'bank_branchName': profile.bank_branch_name or '',
+                'bank_branchCity': profile.bank_branch_city or '',
+                'bank_accountNumber': profile.bank_account_number or '',
             }
             
     except requests.exceptions.HTTPError as e:
@@ -309,7 +321,9 @@ def get_profile(sh_id, otp_code):
         logger.error(f"Error retrieving profile: {str(e)}")
         ErrorLog.objects.create(error_data=str(e))
         return {'error': 'Something went wrong'}
-
+    
+    
+    
 class GetOTPView(APIView):
     """API view to request an OTP for a user."""
     throttle_classes = [AnonRateThrottle]
