@@ -169,7 +169,7 @@ def get_profile(sh_id, otp_code):
         print("Profile data retrieved successfully")
         
         try:
-            logger.info(f"Profile data retrieved: {profile_data}")
+            print(f"Profile data retrieved: {profile_data}")
         except Exception as e:
             logger.error(f"Error printing profile data: {str(e)}")
         # Validate profile data structure
